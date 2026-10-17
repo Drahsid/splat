@@ -77,7 +77,7 @@ def initialize_segments(config_segments: Union[dict, list]) -> List[Segment]:
                 "Next segment address could not be found. Segments list must end with a rom end pos marker ([0x10000000])"
             )
 
-        if segment_class.is_noload():
+        if segment_class.is_noload_yaml(seg_yaml):
             # Pretend bss's rom address is after the last actual rom segment
             this_start = last_rom_end
             # and it has a rom size of zero

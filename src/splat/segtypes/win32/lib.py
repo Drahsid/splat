@@ -29,5 +29,15 @@ class Win32SegLib(Win32Unit):
     def get_linker_section(self) -> str:
         return (self.linker_section or ".text").split("$", 1)[0]
 
+    @staticmethod
+    def is_noload_yaml(yaml) -> bool:
+        return (
+            isinstance(yaml, dict)
+            and (yaml.get("linker_section") or ".text").split("$", 1)[0] == ".bss"
+        )
+
+    def is_noload(self) -> bool:
+        return self.get_linker_section() == ".bss"
+
     def source_path(self) -> Path:
         return options.opts.build_path / "lib" / self.dir / f"{self.name}.obj"

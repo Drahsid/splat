@@ -61,7 +61,7 @@ class CommonSegGroup(CommonSegment):
         """
 
         bss_size: Optional[int] = None
-        if segment_class.is_noload():
+        if segment_class.is_noload_yaml(subsegment_yaml):
             # Pretend bss's rom address is after the last actual rom segment
             start = last_rom_end
             # and it has a rom size of zero

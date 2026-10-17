@@ -415,7 +415,7 @@ class Segment:
         name_address = rom_start
         if (
             options.opts.platform == "win32"
-            and cls.is_noload()
+            and cls.is_noload_yaml(yaml)
             and vram_start is not None
         ):
             name_address = vram_start
@@ -529,6 +529,10 @@ class Segment:
     @staticmethod
     def is_noload() -> bool:
         return False
+
+    @classmethod
+    def is_noload_yaml(cls, yaml: Union[dict, list]) -> bool:
+        return cls.is_noload()
 
     @staticmethod
     def estimate_size(yaml: Union[Dict, List]) -> Optional[int]:
