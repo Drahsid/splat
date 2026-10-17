@@ -595,6 +595,11 @@ def main(
 
     initialize_all_symbols(all_segments)
 
+    if options.opts.platform == "win32":
+        from ..segtypes.win32 import objects
+
+        objects.prepare(all_segments, rom_bytes)
+
     # Resolve raster/palette siblings
     if options.opts.is_mode_active("img"):
         palettes.initialize(all_segments)

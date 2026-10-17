@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import re
-from typing import Dict, List, Optional, Set, TYPE_CHECKING
+from typing import Dict, Iterable, List, Optional, Set, TYPE_CHECKING
 
 import spimdisasm
 
@@ -72,7 +72,7 @@ def to_cname(symbol_name: str) -> str:
 
 def handle_sym_addrs(
     path: Path,
-    sym_addrs_lines: List[str],
+    sym_addrs_lines: Iterable[str],
     all_segments: "List[Segment]",
 ):
     def get_seg_for_name(name: str) -> Optional["Segment"]:
@@ -90,10 +90,8 @@ def handle_sym_addrs(
     all_symbols_dict: Dict[int, List["Symbol"]] = {}
 
     seen_symbols: Dict[str, "Symbol"] = {}
-    prog_bar = progress_bar.get_progress_bar(sym_addrs_lines)
-    prog_bar.set_description(f"Loading symbols ({path.stem})")
     line: str
-    for line_num, line in enumerate(prog_bar):
+    for line_num, line in enumerate(sym_addrs_lines):
         line = line.strip()
         if line != "" and not line.startswith("//"):
             comment_loc = line.find("//")
@@ -386,7 +384,10 @@ def initialize(all_segments: "List[Segment]"):
         if path.exists():
             with open(path, encoding="utf-8") as f:
                 sym_addrs_lines = f.readlines()
-                handle_sym_addrs(path, sym_addrs_lines, all_segments)
+
+            prog_bar = progress_bar.get_progress_bar(sym_addrs_lines)
+            prog_bar.set_description(f"Loading symbols ({path.stem})")
+            handle_sym_addrs(path, prog_bar, all_segments)
 
 
 def initialize_spim_context(manager: "SegmentManager") -> None:

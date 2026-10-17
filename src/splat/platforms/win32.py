@@ -1157,11 +1157,12 @@ def parse_version_info(data: bytes, pe: PEInfo) -> None:
 
 def init(target_bytes: bytes):
     global info, raw_image
-    from ..segtypes.win32 import x86
+    from ..segtypes.win32 import objects, x86
 
     translation_units.clear()
     translation_units_by_name.clear()
     x86.reset()
+    objects.reset()
     info = parse_pe(target_bytes)
     raw_image = target_bytes
     if info.machine not in (MACHINE_I386, MACHINE_AMD64):

@@ -163,6 +163,12 @@ class LinkerEntry:
             f"{self.segment.name}, {self.segment.rom_start}"
         )
 
+        if options.opts.platform == "win32":
+            from .win32 import objects
+
+            if objects.emit_entry(self, linker_writer):
+                return
+
         if self.noload and self.bss_contains_common:
             linker_writer._write_object_path_section(
                 self.object_path, f"{self.section_link} COMMON .scommon"
@@ -194,6 +200,11 @@ class LinkerWriter:
         self.is_partial: bool = is_partial
 
         self._indent_level = 0
+
+        if options.opts.platform == "win32":
+            from .win32 import objects
+
+            self.buffer.extend(sorted(objects.requirements))
 
         self._writeln("SECTIONS")
         self._begin_block()
