@@ -342,7 +342,10 @@ class Program:
             for va, section in self.sections
         )
         declared_symbols = symbols.get_all_symbols()
-        self.names: Dict[int, str] = {s.vram_start: s.name for s in declared_symbols}
+        self.names: Dict[int, List[str]] = {}
+        for symbol in declared_symbols:
+            self.names.setdefault(symbol.vram_start, []).append(symbol.name)
+
         self.literal_ranges = []
         self.scalar_ranges = []
         self.nonreferenceable: Set[int] = set()
@@ -490,7 +493,7 @@ class Program:
             if low < va < high:
                 if low in self.nonreferenceable:
                     return None
-                return f"{quote(self.names[low])} + 0x{va - low:X}"
+                return f"{quote(self.names[low][-1])} + 0x{va - low:X}"
             index -= 1
         return self.name(va)
 
@@ -653,7 +656,7 @@ class Program:
         if self.is_inner(va):
             return None
         if va in self.names:
-            return quote(self.names[va])
+            return quote(self.names[va][-1])
         if va in self.functions:
             return f"_func_{va:08X}"
         if va in self.tables:
@@ -668,7 +671,11 @@ class Program:
 
     def label(self, out: TextIO, va: int):
         name = self.name(va)
-        if name is not None:
+        if name is None:
+            return
+
+        names = [quote(item) for item in self.names[va]] if va in self.names else [name]
+        for name in dict.fromkeys(names):
             if not name.startswith((".L", "jtbl_")):
                 out.write(f"\n.globl {name}\n")
             out.write(f"{name}:\n")

@@ -19,6 +19,7 @@ from ...util.coff import (
     CoffObject,
     CoffSection,
     CoffSymbol,
+    fold_sections,
     linker_requirements,
     rename_symbols,
     select_sections,
@@ -488,6 +489,25 @@ class ObjectSelection:
     contents: bytearray
     requirements: Dict[str, Tuple[str, ...]]
     sections: List[CoffSection]
+    folded: Dict[int, int]
+
+
+def associated_sections(unit):
+    associated = set()
+    for symbol in unit.coff.symbols.values():
+        if (
+            symbol.storage == CLASS_STATIC
+            and symbol.auxiliary
+            and symbol.section in unit.definitions
+            and not symbol.value
+            and not symbol.kind
+            and symbol.name == unit.coff.sections[symbol.section - 1].name
+        ):
+            parent, kind = struct.unpack_from("<HB", unit.coff.data, symbol.offset + 30)
+            if kind == SELECT_ASSOCIATIVE:
+                associated.update((parent, symbol.section))
+
+    return associated
 
 
 def select_object(unit, placements, images, addresses) -> ObjectSelection:
@@ -510,6 +530,9 @@ def select_object(unit, placements, images, addresses) -> ObjectSelection:
     contents, forced, removed = select_sections(unit.coff, addresses, ranges, roots)
     sections = [section for section in unit.sections if section.index not in removed]
     occupied = []
+    associated = associated_sections(unit)
+    providers = {}
+    folded = {}
 
     for section in sections:
         address = placements.get(section.index)
@@ -524,13 +547,36 @@ def select_object(unit, placements, images, addresses) -> ObjectSelection:
                 f"{unit.source}: unresolved section {section.index}: {unresolved + mismatched}"
             )
 
+        if (
+            section.code
+            and section.flags & LNK_COMDAT
+            and section.index not in associated
+        ):
+            key = (
+                address,
+                section.name,
+                section.body,
+                tuple(
+                    (
+                        relocation.offset,
+                        relocation.kind,
+                        _expected(unit, relocation.symbol, addresses, placements),
+                    )
+                    for relocation in section.relocations
+                ),
+            )
+            if key in providers:
+                folded[section.index] = providers[key]
+                continue
+            providers[key] = section.index
+
         occupied.append((address, address + section.size))
 
     occupied.sort()
     if any(end > following for (_, end), (following, _) in zip(occupied, occupied[1:])):
         raise ValueError(f"{unit.source}: overlapping retained sections")
 
-    return ObjectSelection(unit, placements, contents, forced, sections)
+    return ObjectSelection(unit, placements, contents, forced, sections, folded)
 
 
 def fold_references(selected):
@@ -539,21 +585,7 @@ def fold_references(selected):
 
     for selection in selected:
         unit = selection.unit
-        associated = set()
-        for symbol in unit.coff.symbols.values():
-            if (
-                symbol.storage == CLASS_STATIC
-                and symbol.auxiliary
-                and symbol.section in unit.definitions
-                and not symbol.value
-                and not symbol.kind
-                and symbol.name == unit.coff.sections[symbol.section - 1].name
-            ):
-                parent, kind = struct.unpack_from(
-                    "<HB", unit.coff.data, symbol.offset + 30
-                )
-                if kind == SELECT_ASSOCIATIVE:
-                    associated.update((parent, symbol.section))
+        associated = associated_sections(unit)
 
         retained = {section.index for section in selection.sections}
         for section in unit.sections:
@@ -563,6 +595,7 @@ def fold_references(selected):
                 or not section.flags & LNK_COMDAT
                 or section.relocations
                 or section.index in associated
+                or section.index in selection.folded
                 or section.index not in selection.placements
                 or len(definitions) != 1
                 or definitions[0].value
@@ -764,8 +797,13 @@ def write_object(selection):
     contents = selection.contents
     requirements.update(linker_requirements(selection.requirements))
     parts = []
+    if selection.folded:
+        fold_sections(unit.coff, contents, selection.folded)
 
     for section in selection.sections:
+        if section.index in selection.folded:
+            continue
+
         start = selection.placements[section.index]
         name = f".n{section.index:X}"
         contents[section.header : section.header + 8] = name.encode().ljust(8, b"\0")

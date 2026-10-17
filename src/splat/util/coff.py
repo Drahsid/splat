@@ -216,6 +216,39 @@ def rename_symbols(obj: CoffObject, data: bytearray, names: Dict[int, str]) -> N
     struct.pack_into("<I", data, strings, len(data) - strings)
 
 
+def fold_sections(obj: CoffObject, data: bytearray, folded: Dict[int, int]) -> None:
+    section_symbols = {
+        symbol.section: symbol
+        for symbol in obj.symbols.values()
+        if symbol.storage == CLASS_STATIC
+        and symbol.section > 0
+        and symbol.auxiliary
+        and not symbol.value
+        and not symbol.kind
+        and symbol.name == obj.sections[symbol.section - 1].name
+    }
+    references = {
+        section_symbols[source].index: section_symbols[target].index
+        for source, target in folded.items()
+    }
+
+    for symbol in obj.symbols.values():
+        if symbol.section in folded and symbol.index not in references:
+            struct.pack_into("<h", data, symbol.offset + 12, folded[symbol.section])
+
+    for section in obj.sections:
+        if section.index in folded:
+            data[section.header : section.header + 8] = b".discard"
+            flags = section.flags & ~LNK_COMDAT | LNK_REMOVE
+            struct.pack_into("<I", data, section.header + 36, flags)
+
+        relocations = struct.unpack_from("<I", obj.data, section.header + 24)[0]
+        for index, relocation in enumerate(section.relocations):
+            target = references.get(relocation.symbol.index)
+            if target is not None:
+                struct.pack_into("<I", data, relocations + index * 10 + 4, target)
+
+
 def select_sections(
     obj: CoffObject,
     addresses: Dict[str, int],
