@@ -120,6 +120,8 @@ class SplatOpts:
     ld_symbol_header_path: Optional[Path]
     # Determines whether to add a discard section with a wildcard to the linker script
     ld_discard_section: bool
+    # Error if the linker script leaves any input sections unplaced
+    ld_assert_no_orphans: bool
     # A list of sections to preserve during link time. It can be useful to preserve debugging sections
     ld_sections_allowlist: List[str]
     # A list of sections to discard during link time. It can be useful to avoid using the wildcard discard. Note that this option does not turn off `ld_discard_section`
@@ -539,6 +541,7 @@ def _parse_yaml(
         ld_script_path=p.parse_path(base_path, "ld_script_path", f"{basename}.ld"),
         ld_symbol_header_path=p.parse_optional_path(base_path, "ld_symbol_header_path"),
         ld_discard_section=p.parse_opt("ld_discard_section", bool, True),
+        ld_assert_no_orphans=p.parse_opt("ld_assert_no_orphans", bool, False),
         ld_sections_allowlist=p.parse_opt("ld_sections_allowlist", list, []),
         ld_sections_denylist=p.parse_opt("ld_sections_denylist", list, []),
         ld_wildcard_sections=p.parse_opt("ld_wildcard_sections", bool, False),

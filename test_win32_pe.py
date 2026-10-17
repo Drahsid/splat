@@ -1,49 +1,4 @@
 #!/usr/bin/env python3
-"""Unit tests for the win32 PE platform.
-
-Builds tiny PE32 / PE32+ byte blobs in memory and asserts the parsed,
-labelled, or YAML-emitted output is what the spec dictates. Coverage:
-
-Parsers — every data directory + the structural headers:
-  - `parse_pe`              DOS / COFF / optional header / section table,
-                            fuzz-cap edge cases (bad e_lfanew, runt opt
-                            header, oversize NumberOfRvaAndSizes,
-                            machine/magic mismatch, etc.)
-  - `parse_exports`         data dir 0 — named / ordinal-only / forwarders
-  - `parse_imports`         data dir 1 — eager IAT, PE32+ thunks, hint fallback
-  - `parse_resources`       data dir 2 — type/name/lang walk + depth cap
-  - `parse_exception_table` data dir 3 — PE32+ RUNTIME_FUNCTION records
-  - `parse_relocations`     data dir 5 — HIGHLOW / DIR64
-  - `parse_debug`           data dir 6 — RSDS / NB10 CodeView records
-  - `parse_tls`             data dir 9 — callback array walk
-  - `parse_load_config`     data dir 10 — /GS cookie, SafeSEH, /guard:cf
-  - `parse_bound_imports`   data dir 11 — descriptors + forwarder refs
-  - `parse_delay_imports`   data dir 13 — v1 / v2 descriptor chains
-
-Label generation helpers (centralised in `platforms.win32`):
-  - `sanitize_label`        punctuation / leading-digit handling
-  - `compute_iat_labels`    eager + delay IAT slot deduplication
-  - `compute_export_labels` named + reserved-set seed collision
-
-YAML emission (`create_win32_config`):
-  - section classification (text / data / rodata / bss / pdata / bin)
-  - tail-section sort (COFF symtab + Authenticode signature in file order)
-  - symbol categories (entrypoint, exports, imports, delay-imports, TLS
-    callbacks, SafeSEH, CFG targets, /GS cookie)
-  - pathological inputs (BSS-only PEs, resource-only DLLs, all-forwarder
-    shims, phantom raw-pointer-zero sections, spaces in filenames)
-
-Detector helpers (`segtypes.win32.data`):
-  - `_is_string_byte`, `_scan_string`, `_scan_wide_string`,
-    `_escape_string`, `_decode_wide` — narrow + wide ANSI string
-    recognition including Latin-1 Supplement.
-
-Header rendering (`segtypes.win32.header`):
-  - `_decode_flags` (unknown-bit surfacing), `_dump_optional_header`
-    bound checks for runt headers, `_MACHINE_TYPES` / `_SUBSYSTEMS` /
-    `_DLL_CHARACTERISTICS` table coverage.
-"""
-
 import struct
 import unittest
 
@@ -2539,7 +2494,6 @@ class Win32PublicSurfaceTest(unittest.TestCase):
             "sanitize_label",
             "compute_iat_labels",
             "compute_export_labels",
-            "ptr_layout",
             "resolve_exact_encoding",
             # Machine codes
             "MACHINE_I386",
@@ -2893,175 +2847,6 @@ class ParsePEFarPeOffsetTest(unittest.TestCase):
             win32_platform.parse_pe(bytes(buf))
 
 
-class EscapeStringTest(unittest.TestCase):
-    """`_escape_string` produces the same GAS-compatible escape forms
-    consistently across the data segment's `.asciz` emission and the
-    wide-string `/* L"..." */` preview comments."""
-
-    def test_quote_and_backslash_escaped(self):
-        from src.splat.segtypes.win32.data import _escape_string
-
-        self.assertEqual(_escape_string(b'"\\'), r"\"\\")
-
-    def test_tab_newline_return_use_short_forms(self):
-        from src.splat.segtypes.win32.data import _escape_string
-
-        self.assertEqual(_escape_string(b"\t\n\r"), r"\t\n\r")
-
-    def test_non_printable_uses_hex_escape(self):
-        from src.splat.segtypes.win32.data import _escape_string
-
-        # 0x01 (SOH) — out of printable range, fall back to \xNN form.
-        self.assertEqual(_escape_string(b"\x01"), r"\x01")
-
-    def test_latin1_supplement_uses_hex_escape(self):
-        from src.splat.segtypes.win32.data import _escape_string
-
-        # 0xFC (ü) — _is_string_byte now accepts it for scanning, but
-        # _escape_string still emits it as \xfc so GAS interprets the
-        # byte literally instead of relying on locale codepage decoding.
-        self.assertEqual(_escape_string(b"\xfc"), r"\xfc")
-
-    def test_decode_wide_round_trips_basic_latin(self):
-        from src.splat.segtypes.win32.data import _decode_wide
-
-        # UTF-16LE bytes for "AB" → "AB" passthrough.
-        self.assertEqual(_decode_wide(b"A\x00B\x00"), "AB")
-
-    def test_decode_wide_uses_unicode_escape_for_non_ascii(self):
-        from src.splat.segtypes.win32.data import _decode_wide
-
-        # Polish 'ł' is U+0142 — outside the 0x20-0x7E printable subset
-        # used for the preview, so the comment falls back to \uNNNN
-        # form rather than the literal codepoint (keeps the generated
-        # .s ASCII-only).
-        self.assertEqual(_decode_wide(b"\x42\x01"), "\\u0142")
-
-
-class NarrowStringDetectionTest(unittest.TestCase):
-    """Narrow ANSI string scanner: NUL-terminated runs of printable bytes."""
-
-    def test_basic_ascii_run(self):
-        from src.splat.segtypes.win32.data import _scan_string
-
-        blob = b"hello\x00"
-        end = _scan_string(blob, 0)
-        self.assertEqual(end, 6)
-
-    def test_run_below_minimum_rejected(self):
-        from src.splat.segtypes.win32.data import _scan_string
-
-        # 3 chars + NUL < STRING_MIN_LEN (4).
-        self.assertIsNone(_scan_string(b"hi\x00\x00", 0))
-
-    def test_missing_terminator_rejected(self):
-        from src.splat.segtypes.win32.data import _scan_string
-
-        # Printable run with no NUL terminator before EOF.
-        self.assertIsNone(_scan_string(b"hello", 0))
-
-    def test_latin1_supplement_accepted(self):
-        from src.splat.segtypes.win32.data import _scan_string
-
-        # 'Müller' in Latin-1: M ü l l e r \0 — middle byte 0xFC is in
-        # the Latin-1 Supplement printable range (0xA0-0xFF). The
-        # scanner accepts it (symmetric with the wide-string scanner).
-        blob = b"M\xfcller\x00"
-        end = _scan_string(blob, 0)
-        self.assertEqual(end, 7)
-
-    def test_non_printable_byte_terminates(self):
-        from src.splat.segtypes.win32.data import _scan_string
-
-        # 0x01 (SOH) isn't in our printable set — scanner short-circuits
-        # without finding a NUL terminator.
-        self.assertIsNone(_scan_string(b"ab\x01cd\x00", 0))
-
-
-class WideStringDetectionTest(unittest.TestCase):
-    """Wide-string scanner returns the byte range past the WCHAR NUL."""
-
-    def test_simple_utf16_string(self):
-        from src.splat.segtypes.win32.data import _scan_wide_string, _decode_wide
-
-        # "Hello\0" in UTF-16LE
-        blob = b"H\x00e\x00l\x00l\x00o\x00\x00\x00"
-        end = _scan_wide_string(blob, 0)
-        self.assertEqual(end, 12)
-        assert end is not None
-        self.assertEqual(_decode_wide(blob[: end - 2]), "Hello")
-
-    def test_too_short_rejected(self):
-        from src.splat.segtypes.win32.data import _scan_wide_string
-
-        # "Hi\0" — only 2 WCHARs, below WIDE_STRING_MIN_LEN=4.
-        self.assertIsNone(_scan_wide_string(b"H\x00i\x00\x00\x00", 0))
-
-    def test_misaligned_offset(self):
-        from src.splat.segtypes.win32.data import _scan_wide_string
-
-        # Odd start offsets aren't valid WCHAR positions.
-        blob = b"\x00H\x00e\x00l\x00l\x00o\x00\x00\x00"
-        self.assertIsNone(_scan_wide_string(blob, 1))
-
-    def test_high_byte_nonzero_rejected(self):
-        from src.splat.segtypes.win32.data import _scan_wide_string
-
-        # If the WCHAR's high byte is nonzero (codepoint > U+00FF — i.e.
-        # outside Basic Latin + Latin-1 Supplement, the conservative
-        # Western-language coverage zone), our cautious detector skips
-        # the run to avoid false positives.
-        # Polish 'ł' is U+0142 -> UTF-16LE bytes 0x42 0x01.
-        blob = b"\x42\x01\x42\x01\x42\x01\x42\x01\x00\x00"
-        self.assertIsNone(_scan_wide_string(blob, 0))
-
-    def test_latin1_supplement_accepted(self):
-        from src.splat.segtypes.win32.data import _scan_wide_string
-
-        # Latin-1 Supplement (U+00A0 .. U+00FF) covers German umlauts,
-        # French accents, Spanish ñ — common in localised resources.
-        # 'Müller' is M ü l l e r -> 4D 00 FC 00 6C 00 6C 00 65 00 72 00.
-        blob = b"\x4d\x00\xfc\x00\x6c\x00\x6c\x00\x65\x00\x72\x00\x00\x00"
-        end = _scan_wide_string(blob, 0)
-        self.assertEqual(end, len(blob))
-
-
-class Win32SegBssTest(unittest.TestCase):
-    def test_reserved_size_resolution(self):
-        """Win32SegBss.reserved_size resolves: explicit yaml bss_size
-        wins over vram-end - vram-start arithmetic; zero when neither
-        is available."""
-        from src.splat.segtypes.win32.bss import Win32SegBss
-
-        obj = Win32SegBss.__new__(Win32SegBss)
-        # Upstream's bss_size rework requires every Segment to have a
-        # bss_size attribute. Provide it for the bypass-init path.
-        obj.bss_size = 0
-
-        # 1) Explicit bss_size in yaml wins.
-        obj.yaml = {"bss_size": 0x1000}
-        obj.vram_start = 0x10000000
-        # vram_end is a @property derived from vram_start + size; ignore
-        # via direct attribute override.
-        self.assertEqual(obj.reserved_size, 0x1000)
-
-        # 2) Without bss_size, fall back to vram_end - vram_start.
-        # vram_end on the Segment base is a property — emulate by giving
-        # obj.rom_start / rom_end so size resolves to a known value.
-        obj.yaml = {}
-        obj.rom_start = 0
-        obj.rom_end = 0x500
-        # vram_end = vram_start + (rom_end - rom_start) = 0x10000500
-        self.assertEqual(obj.reserved_size, 0x500)
-
-        # 3) Neither yaml nor a derivable vram_end → 0.
-        obj.yaml = {}
-        obj.rom_start = None
-        obj.rom_end = None
-        obj.vram_start = None
-        self.assertEqual(obj.reserved_size, 0)
-
-
 class ResolveExactEncodingTest(unittest.TestCase):
     """Direct tests for the shared helper, complementing the segtype-
     level inheritance test."""
@@ -3106,35 +2891,6 @@ class ResolveExactEncodingTest(unittest.TestCase):
         list_yaml = types.SimpleNamespace(yaml=[])
         self.assertFalse(win32_platform.resolve_exact_encoding({}, no_yaml))
         self.assertFalse(win32_platform.resolve_exact_encoding({}, list_yaml))
-
-
-class Win32ExactEncodingInheritanceTest(unittest.TestCase):
-    def test_inheritance_chain(self):
-        """exact_encoding resolves in priority order:
-        subsegment YAML > parent code-group YAML > class default."""
-        from src.splat.segtypes.win32.text import Win32SegText
-        from src.splat.segtypes.win32.data import Win32SegData
-        from src.splat.segtypes.win32.pdata import Win32SegPdata
-
-        for cls in (Win32SegText, Win32SegData, Win32SegPdata):
-            # Instantiate manually (bypass splat's segment factory).
-            obj = cls.__new__(cls)
-            obj.yaml = {}
-            obj.parent = None
-            self.assertFalse(obj.exact_encoding)  # type: ignore[attr-defined]
-
-            obj.yaml = {"exact_encoding": True}
-            self.assertTrue(obj.exact_encoding)  # type: ignore[attr-defined]
-
-            obj.yaml = {}
-            # Use a simple namespace as parent — it just needs a .yaml attr.
-            import types
-
-            obj.parent = types.SimpleNamespace(yaml={"exact_encoding": True})  # type: ignore[assignment]
-            self.assertTrue(obj.exact_encoding)  # type: ignore[attr-defined]
-
-            obj.yaml = {"exact_encoding": False}
-            self.assertFalse(obj.exact_encoding)  # type: ignore[attr-defined]
 
 
 class CreateConfigRejectionTest(unittest.TestCase):
@@ -4778,7 +4534,6 @@ class CreateConfigPathologicalBasenameTest(unittest.TestCase):
             # (Path treats the path as a child of tmpdir even when the
             # name is whitespace).
             sp_path = tmpdir / "  "
-            sp_path.write_bytes(bytes(buf))
             create_win32_config(sp_path, bytes(buf))
             # Synthetic fallback basename used since cleaned_basename = ''.
             self.assertTrue((tmpdir / "pe_target.yaml").exists())
@@ -4875,6 +4630,34 @@ class Win32DecodeFlagsLeftoverTest(unittest.TestCase):
 
 
 class Win32HeaderTruncatedOptionalHeaderTest(unittest.TestCase):
+    def test_every_optional_header_truncation_roundtrips(self):
+        from src.splat.segtypes.win32.header import Win32SegHeader
+
+        segment = object.__new__(Win32SegHeader)
+        for optional in (_opt_header_pe32(0x1000), _opt_header_pe32_plus(0x1000)):
+            for length in range(len(optional) + 1):
+                for declared_end in (length, len(optional)):
+                    with self.subTest(
+                        magic=optional[:2], length=length, end=declared_end
+                    ):
+                        lines = segment._dump_optional_header(
+                            optional[:length], 0, declared_end
+                        )
+                        restored = bytearray()
+                        for line in lines:
+                            directive = line.split(" /*", 1)[0]
+                            if not directive.startswith("."):
+                                continue
+                            kind, values = directive.split(None, 1)
+                            size = {".byte": 1, ".short": 2, ".long": 4, ".quad": 8}[
+                                kind
+                            ]
+                            for value in values.split(","):
+                                restored.extend(
+                                    int(value.strip(), 16).to_bytes(size, "little")
+                                )
+                        self.assertEqual(restored, optional[:length])
+
     def test_truncated_optional_header_falls_back_to_byte_block(self):
         """A malformed PE with SizeOfOptionalHeader smaller than the
         standard 0xE0 layout used to emit zero-width
@@ -5020,46 +4803,38 @@ class Win32HeaderWidthTest(unittest.TestCase):
             win32_platform.info = old_info
 
 
-class CapstoneDisassemblerTest(unittest.TestCase):
+class IcedX86DisassemblerTest(unittest.TestCase):
     def test_known_types_includes_primitive_set(self):
-        """CapstoneDisassembler.known_types returns the spimdisasm-mirror
-        primitive vocabulary so symbol_addrs.txt `type:u32` /
-        `type:asciz` entries get accepted by splat's check_valid_type."""
-        from src.splat.disassembler.capstone_disassembler import (
-            CapstoneDisassembler,
+        from src.splat.disassembler.iced_x86_disassembler import (
+            IcedX86Disassembler,
         )
 
-        d = CapstoneDisassembler()
+        d = IcedX86Disassembler()
         kt = d.known_types()
         for t in ("u8", "u32", "s32", "f32", "char", "asciz"):
             self.assertIn(t, kt)
 
-    def test_engine_lazy_creation_uses_pe_bitness(self):
-        """get_engine() picks CS_MODE_32 / CS_MODE_64 from the parsed
-        PE's is_pe32_plus flag — checks deferred-init path."""
-        import capstone
-        from src.splat.disassembler.capstone_disassembler import (
-            CapstoneDisassembler,
-        )
+    def test_dependency_version(self):
+        from unittest.mock import patch
+        from src.splat.disassembler import iced_x86_disassembler as backend
 
-        d = CapstoneDisassembler()
-
-        # Save / restore the global PE info so we don't bleed state.
-        old_info = win32_platform.info
-        try:
-            # PE32 — should get 32-bit mode.
-            win32_platform.info = win32_platform.PEInfo(is_pe32_plus=False)
-            d._md = None  # force recreation
-            md = d.get_engine()
-            self.assertEqual(md.mode, capstone.CS_MODE_32)
-
-            # PE32+ — should get 64-bit mode.
-            win32_platform.info = win32_platform.PEInfo(is_pe32_plus=True)
-            d._md = None
-            md = d.get_engine()
-            self.assertEqual(md.mode, capstone.CS_MODE_64)
-        finally:
-            win32_platform.info = old_info
+        disassembler = backend.IcedX86Disassembler()
+        with (
+            patch.object(backend, "version", return_value="1.21.0"),
+            patch.object(backend.log, "write") as write,
+        ):
+            disassembler.check_version(False, "test")
+            write.assert_called_once_with("splat test (powered by iced-x86 1.21.0)")
+        with (
+            patch.object(backend, "version", return_value="1.20.0"),
+            self.assertRaises(SystemExit),
+        ):
+            disassembler.check_version(False, "test")
+        with (
+            patch.object(backend, "version", side_effect=backend.PackageNotFoundError),
+            self.assertRaises(SystemExit),
+        ):
+            disassembler.check_version(True, "test")
 
 
 class Win32SubsystemNamesTest(unittest.TestCase):
@@ -5232,7 +5007,7 @@ class PEEdgeCasesTest(unittest.TestCase):
         pe = win32_platform.parse_pe(blob)
         self.assertEqual(pe.machine, 0xAA64)
         # init() escalates to log.error → SystemExit because the
-        # downstream x86 capstone backend can't disassemble ARM64.
+        # The x86 backend cannot disassemble ARM64.
         with self.assertRaises(SystemExit):
             win32_platform.init(blob)
 

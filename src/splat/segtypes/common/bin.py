@@ -5,6 +5,7 @@ from ...util import log, options
 
 from .segment import CommonSegment
 from ..segment import SegmentType
+from ..linker_entry import write_file_if_different
 
 
 class CommonSegBin(CommonSegment):
@@ -30,7 +31,7 @@ class CommonSegBin(CommonSegment):
 
         assert isinstance(self.rom_start, int)
         assert isinstance(self.rom_end, int)
-        path.write_bytes(rom_bytes[self.rom_start : self.rom_end])
+        write_file_if_different(path, rom_bytes[self.rom_start : self.rom_end])
 
         self.log(f"Wrote {self.name} to {path}")
 

@@ -27,7 +27,7 @@ mips = [
     "crunch64>=0.5.1,<1.0.0",
 ]
 win32 = [
-    "capstone>=5.0.0",
+    "iced-x86>=1.21.0,<2.0.0",
 ]
 dev = [
     "splat64[mips]",

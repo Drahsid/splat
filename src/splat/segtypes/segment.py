@@ -401,7 +401,6 @@ class Segment:
         bss_size: Optional[int] = None,
     ) -> "Segment":
         type = Segment.parse_segment_type(yaml)
-        name = Segment.parse_segment_name(cls, rom_start, yaml)
 
         vram_class = parse_segment_vram_class(yaml)
 
@@ -412,6 +411,15 @@ class Segment:
             vram_start = vram_class.vram
         else:
             vram_start = parse_segment_vram(yaml)
+
+        name_address = rom_start
+        if (
+            options.opts.platform == "win32"
+            and cls.is_noload()
+            and vram_start is not None
+        ):
+            name_address = vram_start
+        name = Segment.parse_segment_name(cls, name_address, yaml)
 
         args: List[str] = [] if isinstance(yaml, dict) else yaml[3:]
 
@@ -764,7 +772,14 @@ class Segment:
         return f"{addr:X}"
 
     def is_name_default(self):
-        return self.name == self.get_default_name(self.rom_start)
+        address = self.rom_start
+        if (
+            options.opts.platform == "win32"
+            and self.is_noload()
+            and self.vram_start is not None
+        ):
+            address = self.vram_start
+        return self.name == self.get_default_name(address)
 
     def unique_id(self):
         if self.parent:

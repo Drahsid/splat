@@ -352,8 +352,10 @@ def handle_sym_addrs(
                                     f"Duplicate symbol detected! {sym.name} clashes with {item.name} defined at vram 0x{addr:08X}.\n  If this is intended, specify either a segment or a rom address for this symbol"
                                 )
 
-                if len(sym.filename) > 253 or any(
-                    c in ILLEGAL_FILENAME_CHARS for c in sym.filename
+                # Win32 output filenames come from segment names or addresses
+                if options.opts.platform != "win32" and (
+                    len(sym.filename) > 253
+                    or any(c in ILLEGAL_FILENAME_CHARS for c in sym.filename)
                 ):
                     log.parsing_error_preamble(path, line_num, line)
                     log.error(

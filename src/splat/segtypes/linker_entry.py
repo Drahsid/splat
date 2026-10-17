@@ -33,26 +33,23 @@ def clean_up_path(path: Path) -> Path:
 
 def path_to_object_path(path: Path) -> Path:
     path = clean_up_path(path)
+    build_path = clean_up_path(options.opts.build_path)
     if options.opts.use_o_as_suffix:
         full_suffix = ".o"
     else:
         full_suffix = path.suffix + ".o"
 
-    if not str(path).startswith(str(options.opts.build_path)):
-        path = options.opts.build_path / path
+    if not path.is_relative_to(build_path):
+        path = build_path / path
     return clean_up_path(path.with_suffix(full_suffix))
 
 
-def write_file_if_different(path: Path, new_content: str):
-    if path.exists():
-        old_content = path.read_text(encoding="utf-8")
-    else:
-        old_content = ""
-
-    if old_content != new_content:
+def write_file_if_different(path: Path, new_content: Union[str, bytes]):
+    if isinstance(new_content, str):
+        new_content = new_content.replace("\n", options.opts.c_newline).encode("utf-8")
+    if not path.exists() or path.read_bytes() != new_content:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8", newline=options.opts.c_newline) as f:
-            f.write(new_content)
+        path.write_bytes(new_content)
 
 
 def get_segment_rom_start(cname: str) -> str:
@@ -137,14 +134,14 @@ class LinkerEntry:
 
     @property
     def section_order_type(self) -> str:
-        if self.section_order == ".rdata":
+        if self.section_order == ".rdata" and options.opts.platform != "win32":
             return ".rodata"
         else:
             return self.section_order
 
     @property
     def section_link_type(self) -> str:
-        if self.section_link == ".rdata":
+        if self.section_link == ".rdata" and options.opts.platform != "win32":
             return ".rodata"
         else:
             return self.section_link
@@ -230,6 +227,8 @@ class LinkerWriter:
     # Adds all the entries of a segment to the linker script buffer
     def add(self, segment: Segment, max_vram_syms: List[Tuple[str, List[Segment]]]):
         entries = segment.get_linker_entries()
+        if not entries:
+            return
         self.entries.extend(entries)
         self.dependencies_entries.extend(entries)
 
@@ -489,6 +488,8 @@ class LinkerWriter:
             self._end_partial_segment(section_name)
 
     def save_linker_script(self, output_path: Path):
+        if options.opts.ld_assert_no_orphans and self.linker_discard_section:
+            log.error("ld_assert_no_orphans requires ld_discard_section: False")
         if len(self.sections_allowlist) > 0:
             address = " 0"
             if self.is_partial:
@@ -509,6 +510,15 @@ class LinkerWriter:
             if self.linker_discard_section:
                 self._writeln("*(*);")
             self._end_block()
+
+        if options.opts.ld_assert_no_orphans:
+            self._writeln(".splat_unplaced 0 :")
+            self._begin_block()
+            self._writeln("*(*);")
+            self._end_block()
+            self._writeln(
+                'ASSERT(SIZEOF(.splat_unplaced) == 0, "unplaced input sections")'
+            )
 
         self._end_block()  # SECTIONS
 
