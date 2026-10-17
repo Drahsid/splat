@@ -378,6 +378,24 @@ def resolve_objects(units, images, manual_addresses):
                 )
             ]
 
+            matched_code = [
+                (placements[section.index], section.size)
+                for section in unit.sections
+                if section.code
+                and section.index in placements
+                and _allowed(unit, section, placements[section.index], images)
+                and not any(
+                    _issues(
+                        unit,
+                        section,
+                        placements[section.index],
+                        images,
+                        addresses,
+                        placements,
+                    )
+                )
+            ]
+
             for section in unit.sections:
                 address = placements.get(section.index)
                 if address is None:
@@ -401,11 +419,19 @@ def resolve_objects(units, images, manual_addresses):
 
                 overlap = bool(
                     section.flags & LNK_COMDAT
-                    and any(
-                        index != section.index
-                        and start < address + section.size
-                        and end > address
-                        for index, start, end in anchored
+                    and (
+                        any(
+                            index != section.index
+                            and start < address + section.size
+                            and end > address
+                            for index, start, end in anchored
+                        )
+                        or any(
+                            size > section.size
+                            and start <= address
+                            and address + section.size <= start + size
+                            for start, size in matched_code
+                        )
                     )
                 )
                 internal_unresolved = any(
@@ -466,7 +492,22 @@ class ObjectSelection:
 
 def select_object(unit, placements, images, addresses) -> ObjectSelection:
     ranges = [(start, end) for start, end, _ in unit.ranges]
-    contents, forced, removed = select_sections(unit.coff, addresses, ranges)
+    static_functions = {
+        symbol.section
+        for symbol in unit.coff.symbols.values()
+        if symbol.storage == CLASS_STATIC and symbol.kind & 0x20
+    }
+    roots = tuple(
+        section.index
+        for section in unit.sections
+        if section.code
+        and section.flags & LNK_COMDAT
+        and section.index in static_functions
+        and not unit.definitions[section.index]
+        and section.index in placements
+        and _allowed(unit, section, placements[section.index], images)
+    )
+    contents, forced, removed = select_sections(unit.coff, addresses, ranges, roots)
     sections = [section for section in unit.sections if section.index not in removed]
     occupied = []
 
@@ -508,7 +549,9 @@ def fold_references(selected):
                 and not symbol.kind
                 and symbol.name == unit.coff.sections[symbol.section - 1].name
             ):
-                parent, kind = struct.unpack_from("<HB", unit.coff.data, symbol.offset + 30)
+                parent, kind = struct.unpack_from(
+                    "<HB", unit.coff.data, symbol.offset + 30
+                )
                 if kind == SELECT_ASSOCIATIVE:
                     associated.update((parent, symbol.section))
 

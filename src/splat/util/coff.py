@@ -217,7 +217,10 @@ def rename_symbols(obj: CoffObject, data: bytearray, names: Dict[int, str]) -> N
 
 
 def select_sections(
-    obj: CoffObject, addresses: Dict[str, int], ranges: List[Tuple[int, int]]
+    obj: CoffObject,
+    addresses: Dict[str, int],
+    ranges: List[Tuple[int, int]],
+    roots: Tuple[int, ...] = (),
 ) -> Tuple[bytearray, Dict[str, Tuple[str, ...]], Set[int]]:
     data = bytearray(obj.data)
 
@@ -393,7 +396,7 @@ def select_sections(
             removed.add(section)
 
     # Ordinary sections
-    live = set()
+    live = set(roots) - removed - set(parents)
     forced_sections = {
         referenced_section(index)
         for index, symbol in symbols.items()
