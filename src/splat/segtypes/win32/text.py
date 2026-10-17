@@ -17,6 +17,8 @@ class Win32SegText(CommonSegment):
         return ".text"
 
     def get_section_flags(self) -> Optional[str]:
+        if self.get_linker_section_linksection() == ".text":
+            return None
         return "xr"
 
     def out_path(self) -> Path:

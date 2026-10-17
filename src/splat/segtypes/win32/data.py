@@ -19,6 +19,8 @@ class Win32SegData(CommonSegment):
         return self.SECTION
 
     def get_section_flags(self) -> Optional[str]:
+        if self.get_linker_section_linksection() == ".data":
+            return None
         return "dw"
 
     def out_path(self) -> Path:

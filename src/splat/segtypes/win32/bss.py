@@ -8,6 +8,8 @@ class Win32SegBss(Win32SegData):
     SECTION = ".bss"
 
     def get_section_flags(self) -> Optional[str]:
+        if self.get_linker_section_linksection() == ".bss":
+            return None
         return "bw"
 
     @staticmethod
