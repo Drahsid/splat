@@ -10,14 +10,17 @@ from pathlib import Path
 
 from ...util.coff import (
     CLASS_EXTERNAL,
+    CLASS_STATIC,
     CLASS_WEAK_EXTERNAL,
     LNK_COMDAT,
     LNK_INFO,
     LNK_REMOVE,
+    SELECT_ASSOCIATIVE,
     CoffObject,
     CoffSection,
     CoffSymbol,
     linker_requirements,
+    rename_symbols,
     select_sections,
 )
 from .cpp import assembly_includes, function_ranges
@@ -489,6 +492,72 @@ def select_object(unit, placements, images, addresses) -> ObjectSelection:
     return ObjectSelection(unit, placements, contents, forced, sections)
 
 
+def fold_references(selected):
+    candidates = []
+    providers = {}
+
+    for selection in selected:
+        unit = selection.unit
+        associated = set()
+        for symbol in unit.coff.symbols.values():
+            if (
+                symbol.storage == CLASS_STATIC
+                and symbol.auxiliary
+                and symbol.section in unit.definitions
+                and not symbol.value
+                and not symbol.kind
+                and symbol.name == unit.coff.sections[symbol.section - 1].name
+            ):
+                parent, kind = struct.unpack_from("<HB", unit.coff.data, symbol.offset + 30)
+                if kind == SELECT_ASSOCIATIVE:
+                    associated.update((parent, symbol.section))
+
+        retained = {section.index for section in selection.sections}
+        for section in unit.sections:
+            definitions = unit.definitions[section.index]
+            if (
+                not section.code
+                or not section.flags & LNK_COMDAT
+                or section.relocations
+                or section.index in associated
+                or section.index not in selection.placements
+                or len(definitions) != 1
+                or definitions[0].value
+                or not definitions[0].kind & 0x20
+            ):
+                continue
+
+            key = (selection.placements[section.index], section.body)
+            symbol = definitions[0]
+            if section.index in retained:
+                providers.setdefault(key, []).append(symbol.name)
+            else:
+                candidates.append((key, symbol))
+
+    names = {}
+    for key, symbol in candidates:
+        found = providers.get(key, [])
+        if len(found) == 1 and found[0] != symbol.name:
+            names[symbol.name] = found[0]
+
+    for selection in selected:
+        retained = {section.index for section in selection.sections}
+        renames = {
+            symbol.index: names[symbol.name]
+            for symbol in selection.unit.coff.symbols.values()
+            if symbol.storage in (CLASS_EXTERNAL, CLASS_WEAK_EXTERNAL)
+            and symbol.section not in retained
+            and symbol.name in names
+        }
+        if renames:
+            rename_symbols(selection.unit.coff, selection.contents, renames)
+
+        selection.requirements = {
+            name: tuple(names.get(item, item) for item in chain)
+            for name, chain in selection.requirements.items()
+        }
+
+
 def symbol_records(selected, manual):
     records = {}
 
@@ -736,25 +805,26 @@ def prepare(segments, target: bytes):
         return
 
     added_names = addresses.keys() - library_addresses.keys()
-    for selection in selected_libraries:
+    for index, selection in enumerate(selected_libraries):
         if any(
             symbol.name in added_names
             for symbol in selection.unit.coff.symbols.values()
         ):
-            selection = select_object(
+            selected_libraries[index] = select_object(
                 selection.unit, selection.placements, images, addresses
             )
 
-        write_object(selection)
-
-    for selection in selected_sources:
+    selected = selected_libraries + selected_sources
+    fold_references(selected)
+    for selection in selected:
         unit = selection.unit
-        bounds = dict(function_ranges(*unit.bounds))
-        for path, (start, end) in unit.assembly.items():
-            if bounds.get(start) != end:
-                raise ValueError(
-                    f"{path}: function boundary changed during object discovery"
-                )
+        if unit.assembly:
+            bounds = dict(function_ranges(*unit.bounds))
+            for path, (start, end) in unit.assembly.items():
+                if bounds.get(start) != end:
+                    raise ValueError(
+                        f"{path}: function boundary changed during object discovery"
+                    )
 
         write_object(selection)
 

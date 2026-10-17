@@ -203,6 +203,19 @@ def linker_requirements(requirements: Dict[str, Tuple[str, ...]]) -> List[str]:
     return lines
 
 
+def rename_symbols(obj: CoffObject, data: bytearray, names: Dict[int, str]) -> None:
+    table, count = struct.unpack_from("<II", data, 8)
+    strings = table + count * 18
+    if strings + struct.unpack_from("<I", data, strings)[0] != len(data):
+        raise ValueError("COFF string table is not at end of file")
+
+    for index, name in names.items():
+        struct.pack_into("<II", data, obj.symbols[index].offset, 0, len(data) - strings)
+        data.extend(name.encode("latin1") + b"\0")
+
+    struct.pack_into("<I", data, strings, len(data) - strings)
+
+
 def select_sections(
     obj: CoffObject, addresses: Dict[str, int], ranges: List[Tuple[int, int]]
 ) -> Tuple[bytearray, Dict[str, Tuple[str, ...]], Set[int]]:
