@@ -353,6 +353,48 @@ def _issues(unit, section, address, images, addresses, placements):
     return unresolved, mismatched
 
 
+def _resolve_candidates(output, candidates, images, manual_addresses):
+    remaining = [dict(placements) for _, placements in output]
+
+    while True:
+        proposals = {}
+        for (unit, _), placements, eligible in zip(output, remaining, candidates):
+            for section in unit.sections:
+                if section.index not in eligible or section.index not in placements:
+                    continue
+
+                for symbol in unit.definitions[section.index]:
+                    target = placements[section.index] + symbol.value
+                    proposals.setdefault(symbol.name, set()).add(target)
+
+        addresses = dict(manual_addresses)
+        conflicts = []
+        for name, values in proposals.items():
+            if len(values) == 1:
+                addresses[name] = next(iter(values))
+            else:
+                conflicts.append(name)
+
+        changed = False
+        for (unit, _), placements, eligible in zip(output, remaining, candidates):
+            for section in unit.sections:
+                address = placements.get(section.index)
+                if address is None:
+                    continue
+
+                if (
+                    section.index not in eligible
+                    and _allowed(unit, section, address, images)
+                ) or any(
+                    _issues(unit, section, address, images, addresses, placements)
+                ):
+                    del placements[section.index]
+                    changed = True
+
+        if not changed:
+            return addresses, conflicts
+
+
 def resolve_objects(units, images, manual_addresses):
     addresses = dict(manual_addresses)
     definitions = {
@@ -364,12 +406,12 @@ def resolve_objects(units, images, manual_addresses):
     hints = {}
 
     for _ in range(16):
-        proposals = {}
+        candidates = []
         references = {}
-        output = []
-        for unit in units:
-            placements = _place(unit, images, addresses, hints)
-            output.append((unit, placements))
+        output = [(unit, _place(unit, images, addresses, hints)) for unit in units]
+        for unit, placements in output:
+            eligible = set()
+            candidates.append(eligible)
             anchored = [
                 (
                     section.index,
@@ -445,39 +487,16 @@ def resolve_objects(units, images, manual_addresses):
                         )
                     )
                 )
-                unresolved = any(
-                    (
-                        relocation.symbol.section > 0
-                        or relocation.symbol.name not in definitions
-                    )
-                    and _expected(unit, relocation.symbol, addresses, placements)
-                    is None
-                    for relocation in section.relocations
-                )
                 if (
                     _allowed(unit, section, address, images)
                     and not overlap
                     and not mismatched
-                    and not unresolved
                 ):
-                    for symbol in unit.definitions[section.index]:
-                        target = address + symbol.value
-                        if (
-                            symbol.name in manual_addresses
-                            and manual_addresses[symbol.name] != target
-                        ):
-                            continue
+                    eligible.add(section.index)
 
-                        proposals.setdefault(symbol.name, set()).add(target)
-
-        following = dict(manual_addresses)
-        conflicts = []
-        for name, values in proposals.items():
-            if len(values) == 1:
-                following[name] = next(iter(values))
-            else:
-                conflicts.append(name)
-
+        following, conflicts = _resolve_candidates(
+            output, candidates, images, manual_addresses
+        )
         following_hints = {
             name: next(iter(values))
             for name, values in references.items()
