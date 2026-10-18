@@ -21,6 +21,7 @@ from ...util.coff import (
     CoffSymbol,
     fold_sections,
     linker_requirements,
+    reference_sections,
     rename_symbols,
     select_sections,
 )
@@ -297,6 +298,7 @@ def _find(unit, section, images, addresses, placements, hints):
 def _place(unit, images, addresses, hints=None):
     placements = {}
     by_index = {section.index: section for section in unit.sections}
+    associated = associated_sections(unit)
 
     for section in unit.sections:
         found = _find(unit, section, images, addresses, placements, hints or {})
@@ -321,7 +323,15 @@ def _place(unit, images, addresses, hints=None):
                 inferred = (
                     _observed(section, relocation, actual, address) - symbol.value
                 ) & 0xFFFFFFFF
-                if _check(unit, other, inferred, images, addresses, placements):
+                if _check(
+                    unit,
+                    other,
+                    inferred,
+                    images,
+                    addresses,
+                    placements,
+                    other.index in associated,
+                ):
                     placements[other.index] = inferred
                     changed = True
 
@@ -490,10 +500,11 @@ class ObjectSelection:
     requirements: Dict[str, Tuple[str, ...]]
     sections: List[CoffSection]
     folded: Dict[int, int]
+    references: Dict[int, str]
 
 
 def associated_sections(unit):
-    associated = set()
+    associated = {}
     for symbol in unit.coff.symbols.values():
         if (
             symbol.storage == CLASS_STATIC
@@ -505,7 +516,7 @@ def associated_sections(unit):
         ):
             parent, kind = struct.unpack_from("<HB", unit.coff.data, symbol.offset + 30)
             if kind == SELECT_ASSOCIATIVE:
-                associated.update((parent, symbol.section))
+                associated[symbol.section] = parent
 
     return associated
 
@@ -531,12 +542,21 @@ def select_object(unit, placements, images, addresses) -> ObjectSelection:
     sections = [section for section in unit.sections if section.index not in removed]
     occupied = []
     associated = associated_sections(unit)
+    shared = set()
     providers = {}
     folded = {}
 
     for section in sections:
         address = placements.get(section.index)
-        if address is None or not _allowed(unit, section, address, images):
+        if address is None or not _check(
+            unit,
+            section,
+            address,
+            images,
+            addresses,
+            placements,
+            section.index in associated,
+        ):
             raise ValueError(f"{unit.source}: unplaced section {section.index}")
 
         unresolved, mismatched = _issues(
@@ -547,10 +567,15 @@ def select_object(unit, placements, images, addresses) -> ObjectSelection:
                 f"{unit.source}: unresolved section {section.index}: {unresolved + mismatched}"
             )
 
+        if not _allowed(unit, section, address, images):
+            shared.add(section.index)
+            continue
+
         if (
             section.code
             and section.flags & LNK_COMDAT
             and section.index not in associated
+            and section.index not in associated.values()
         ):
             key = (
                 address,
@@ -576,7 +601,21 @@ def select_object(unit, placements, images, addresses) -> ObjectSelection:
     if any(end > following for (_, end), (following, _) in zip(occupied, occupied[1:])):
         raise ValueError(f"{unit.source}: overlapping retained sections")
 
-    return ObjectSelection(unit, placements, contents, forced, sections, folded)
+    sections = [section for section in sections if section.index not in shared]
+    references = {}
+    for section in sections:
+        for relocation in section.relocations:
+            symbol = relocation.symbol
+            if symbol.section in shared:
+                address = placements[symbol.section] + symbol.value
+                prefix = "L_" if unit.coff.sections[symbol.section - 1].code else "_D_"
+                references[symbol.index] = f"{prefix}{address:08X}"
+    if shared:
+        reference_sections(unit.coff, contents, shared, references)
+
+    return ObjectSelection(
+        unit, placements, contents, forced, sections, folded, references
+    )
 
 
 def fold_references(selected):
@@ -595,6 +634,7 @@ def fold_references(selected):
                 or not section.flags & LNK_COMDAT
                 or section.relocations
                 or section.index in associated
+                or section.index in associated.values()
                 or section.index in selection.folded
                 or section.index not in selection.placements
                 or len(definitions) != 1
@@ -639,6 +679,13 @@ def symbol_records(selected, manual):
 
     for selection in selected:
         unit = selection.unit
+        for index, name in selection.references.items():
+            symbol = unit.coff.symbols[index]
+            kind = "label" if unit.coff.sections[symbol.section - 1].code else "u8"
+            records[name] = (
+                selection.placements[symbol.section] + symbol.value,
+                f"type:{kind}",
+            )
         for section in selection.sections:
             address = selection.placements[section.index]
             definitions = sorted(

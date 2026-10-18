@@ -216,6 +216,41 @@ def rename_symbols(obj: CoffObject, data: bytearray, names: Dict[int, str]) -> N
     struct.pack_into("<I", data, strings, len(data) - strings)
 
 
+def reference_sections(
+    obj: CoffObject, data: bytearray, sections: Set[int], names: Dict[int, str]
+) -> None:
+    table, count = struct.unpack_from("<II", data, 8)
+    strings = table + count * 18
+    if strings + struct.unpack_from("<I", data, strings)[0] != len(data):
+        raise ValueError("COFF string table is not at end of file")
+
+    entries = bytearray()
+    references = {}
+    for index, (symbol_index, name) in enumerate(names.items(), count):
+        references[symbol_index] = index
+        entries.extend(
+            struct.pack("<IIIhHBB", 0, len(data) - strings, 0, 0, 0, CLASS_EXTERNAL, 0)
+        )
+        data.extend(name.encode("latin1") + b"\0")
+
+    data[strings:strings] = entries
+    struct.pack_into("<I", data, 12, count + len(names))
+    strings += len(entries)
+    struct.pack_into("<I", data, strings, len(data) - strings)
+
+    for section in obj.sections:
+        if section.index in sections:
+            data[section.header : section.header + 8] = b".discard"
+            flags = section.flags & ~LNK_COMDAT | LNK_REMOVE
+            struct.pack_into("<I", data, section.header + 36, flags)
+
+        offset = struct.unpack_from("<I", data, section.header + 24)[0]
+        for index, relocation in enumerate(section.relocations):
+            target = references.get(relocation.symbol.index)
+            if target is not None:
+                struct.pack_into("<I", data, offset + index * 10 + 4, target)
+
+
 def fold_sections(obj: CoffObject, data: bytearray, folded: Dict[int, int]) -> None:
     section_symbols = {
         symbol.section: symbol
