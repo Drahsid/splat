@@ -19,6 +19,7 @@ from ...util.coff import (
     CoffObject,
     CoffSection,
     CoffSymbol,
+    append_symbols,
     fold_sections,
     linker_requirements,
     reference_sections,
@@ -696,11 +697,44 @@ def fold_references(selected):
         }
 
 
+def _static_functions(selection):
+    unit = selection.unit
+    sections = {
+        section.index
+        for section in selection.sections
+        if section.code and section.index not in selection.folded
+    }
+    external = {
+        symbol.name: (symbol.section, symbol.value)
+        for symbol in unit.coff.symbols.values()
+        if symbol.storage == CLASS_EXTERNAL and symbol.section in sections
+    }
+    functions = {
+        f"_func_{selection.placements[symbol.section] + symbol.value:08X}": symbol
+        for symbol in unit.coff.symbols.values()
+        if symbol.storage == CLASS_STATIC
+        and symbol.kind & 0x20
+        and symbol.section in sections
+        and (symbol.section, symbol.value) not in external.values()
+    }
+    for name in functions:
+        if name in external:
+            raise ValueError(f"{unit.source}: conflicting static function label {name}")
+
+    return functions
+
+
 def symbol_records(selected, manual):
     records = {}
 
     for selection in selected:
         unit = selection.unit
+        for name, symbol in _static_functions(selection).items():
+            if name not in manual:
+                records[name] = (
+                    selection.placements[symbol.section] + symbol.value,
+                    "type:func",
+                )
         for index, name in selection.references.items():
             symbol = unit.coff.symbols[index]
             kind = "label" if unit.coff.sections[symbol.section - 1].code else "u8"
@@ -868,6 +902,16 @@ def write_object(selection):
     parts = []
     if selection.folded:
         fold_sections(unit.coff, contents, selection.folded)
+
+    functions = _static_functions(selection)
+    if functions:
+        append_symbols(
+            contents,
+            [
+                (name, symbol.value, symbol.section, symbol.kind)
+                for name, symbol in functions.items()
+            ],
+        )
 
     for section in selection.sections:
         if section.index in selection.folded:

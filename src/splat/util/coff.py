@@ -216,27 +216,33 @@ def rename_symbols(obj: CoffObject, data: bytearray, names: Dict[int, str]) -> N
     struct.pack_into("<I", data, strings, len(data) - strings)
 
 
-def reference_sections(
-    obj: CoffObject, data: bytearray, sections: Set[int], names: Dict[int, str]
-) -> None:
+def append_symbols(data: bytearray, symbols: List[Tuple[str, int, int, int]]) -> None:
     table, count = struct.unpack_from("<II", data, 8)
     strings = table + count * 18
     if strings + struct.unpack_from("<I", data, strings)[0] != len(data):
         raise ValueError("COFF string table is not at end of file")
 
     entries = bytearray()
-    references = {}
-    for index, (symbol_index, name) in enumerate(names.items(), count):
-        references[symbol_index] = index
+    for name, value, section, kind in symbols:
         entries.extend(
-            struct.pack("<IIIhHBB", 0, len(data) - strings, 0, 0, 0, CLASS_EXTERNAL, 0)
+            struct.pack(
+                "<IIIhHBB", 0, len(data) - strings, value, section, kind, CLASS_EXTERNAL, 0
+            )
         )
         data.extend(name.encode("latin1") + b"\0")
 
     data[strings:strings] = entries
-    struct.pack_into("<I", data, 12, count + len(names))
+    struct.pack_into("<I", data, 12, count + len(symbols))
     strings += len(entries)
     struct.pack_into("<I", data, strings, len(data) - strings)
+
+
+def reference_sections(
+    obj: CoffObject, data: bytearray, sections: Set[int], names: Dict[int, str]
+) -> None:
+    count = struct.unpack_from("<I", data, 12)[0]
+    references = {symbol: count + index for index, symbol in enumerate(names)}
+    append_symbols(data, [(name, 0, 0, 0) for name in names.values()])
 
     for section in obj.sections:
         if section.index in sections:
