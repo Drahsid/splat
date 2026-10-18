@@ -218,6 +218,12 @@ class SegmentMetadata:
             }:
                 # It is expected for labels to overlap with functions
                 pass
+            elif (
+                sym.vram_start == existing_sym.vram_start
+                and sym.allow_duplicated
+                and existing_sym.allow_duplicated
+            ):
+                pass
             else:
                 if existing_sym.given_size is None:
                     existing_size = "None"
