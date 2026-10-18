@@ -55,6 +55,7 @@ class ObjectInput:
     definitions: Dict[int, List[CoffSymbol]] = field(default_factory=dict)
     masks: Dict[int, bytearray] = field(default_factory=dict)
     unsupported: Set[int] = field(default_factory=set)
+    shared_functions: Dict[int, str] = field(default_factory=dict)
 
     def __post_init__(self):
         for section in self.coff.sections:
@@ -296,6 +297,22 @@ def _find(unit, section, images, addresses, placements, hints):
     return found
 
 
+def _is_static_function(unit, section):
+    return bool(
+        section.code
+        and section.flags & LNK_COMDAT
+        and not unit.definitions[section.index]
+        and section.index not in associated_sections(unit)
+        and any(
+            symbol.section == section.index
+            and symbol.storage == CLASS_STATIC
+            and symbol.kind & 0x20
+            and not symbol.value
+            for symbol in unit.coff.symbols.values()
+        )
+    )
+
+
 def _place(unit, images, addresses, hints=None):
     placements = {}
     by_index = {section.index: section for section in unit.sections}
@@ -331,7 +348,7 @@ def _place(unit, images, addresses, hints=None):
                     images,
                     addresses,
                     placements,
-                    other.index in associated,
+                    other.index in associated or _is_static_function(unit, other),
                 ):
                     placements[other.index] = inferred
                     changed = True
@@ -376,21 +393,55 @@ def _resolve_candidates(output, candidates, images, manual_addresses):
             else:
                 conflicts.append(name)
 
+        providers = {}
+        for (unit, _), placements, eligible in zip(output, remaining, candidates):
+            for section in unit.sections:
+                address = placements.get(section.index)
+                if (
+                    not section.code
+                    or section.index not in eligible
+                    or address is None
+                    or any(
+                        _issues(unit, section, address, images, addresses, placements)
+                    )
+                ):
+                    continue
+
+                name = next(
+                    (
+                        symbol.name
+                        for symbol in unit.definitions[section.index]
+                        if not symbol.value
+                    ),
+                    None,
+                )
+                if name is None and _is_static_function(unit, section):
+                    name = f"_func_{address:08X}"
+                if name is not None:
+                    providers.setdefault((address, section.size), name)
+
         changed = False
         for (unit, _), placements, eligible in zip(output, remaining, candidates):
+            unit.shared_functions.clear()
             for section in unit.sections:
                 address = placements.get(section.index)
                 if address is None:
                     continue
 
+                owned = _allowed(unit, section, address, images)
+                borrowed = not owned and _is_static_function(unit, section)
+                key = (address, section.size)
                 if (
-                    section.index not in eligible
-                    and _allowed(unit, section, address, images)
-                ) or any(
-                    _issues(unit, section, address, images, addresses, placements)
+                    (section.index not in eligible and owned)
+                    or (borrowed and key not in providers)
+                    or any(
+                        _issues(unit, section, address, images, addresses, placements)
+                    )
                 ):
                     del placements[section.index]
                     changed = True
+                elif borrowed:
+                    unit.shared_functions[section.index] = providers[key]
 
         if not changed:
             return addresses, conflicts
@@ -578,7 +629,7 @@ def select_object(unit, placements, images, addresses) -> ObjectSelection:
             images,
             addresses,
             placements,
-            section.index in associated,
+            section.index in associated or section.index in unit.shared_functions,
         ):
             raise ValueError(f"{unit.source}: unplaced section {section.index}")
 
@@ -631,8 +682,12 @@ def select_object(unit, placements, images, addresses) -> ObjectSelection:
             symbol = relocation.symbol
             if symbol.section in shared:
                 address = placements[symbol.section] + symbol.value
-                prefix = "L_" if unit.coff.sections[symbol.section - 1].code else "_D_"
-                references[symbol.index] = f"{prefix}{address:08X}"
+                if not symbol.value and symbol.section in unit.shared_functions:
+                    references[symbol.index] = unit.shared_functions[symbol.section]
+                else:
+                    target = unit.coff.sections[symbol.section - 1]
+                    prefix = "L_" if target.code else "_D_"
+                    references[symbol.index] = f"{prefix}{address:08X}"
     if shared:
         reference_sections(unit.coff, contents, shared, references)
 
@@ -738,10 +793,11 @@ def symbol_records(selected, manual):
         for index, name in selection.references.items():
             symbol = unit.coff.symbols[index]
             kind = "label" if unit.coff.sections[symbol.section - 1].code else "u8"
-            records[name] = (
-                selection.placements[symbol.section] + symbol.value,
-                f"type:{kind}",
-            )
+            if name not in manual and name not in records:
+                records[name] = (
+                    selection.placements[symbol.section] + symbol.value,
+                    f"type:{kind}",
+                )
         for section in selection.sections:
             address = selection.placements[section.index]
             definitions = sorted(
