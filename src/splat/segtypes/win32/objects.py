@@ -445,8 +445,11 @@ def resolve_objects(units, images, manual_addresses):
                         )
                     )
                 )
-                internal_unresolved = any(
-                    relocation.symbol.section > 0
+                unresolved = any(
+                    (
+                        relocation.symbol.section > 0
+                        or relocation.symbol.name not in definitions
+                    )
                     and _expected(unit, relocation.symbol, addresses, placements)
                     is None
                     for relocation in section.relocations
@@ -455,7 +458,7 @@ def resolve_objects(units, images, manual_addresses):
                     _allowed(unit, section, address, images)
                     and not overlap
                     and not mismatched
-                    and not internal_unresolved
+                    and not unresolved
                 ):
                     for symbol in unit.definitions[section.index]:
                         target = address + symbol.value
