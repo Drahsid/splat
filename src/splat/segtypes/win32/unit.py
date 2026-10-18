@@ -51,7 +51,9 @@ class Win32Unit(CommonSegment):
         )
         previous = self.contributions.get(section)
         if previous is not None:
-            if low > previous[1] or high < previous[0]:
+            if self.type not in ("c", "cpp", "lib") and (
+                low > previous[1] or high < previous[0]
+            ):
                 log.error(
                     f"Segment '{self.dir / self.name}' has separate '{section}' ranges. "
                     "Use different linker_section names."
